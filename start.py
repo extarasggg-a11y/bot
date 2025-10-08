@@ -44,13 +44,13 @@ async def synthesize_voice(text, filename="answer.mp3", lang="ru-RU", voice="ru-
     await communicate.save(filename)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Скачиваем и конвертируем голосовое
+    # Скачиваем голосовое сообщение правильно (async)
     voice = await update.message.voice.get_file()
-    voice.download("voice.ogg")
+    await voice.download_to_drive("voice.ogg")
     convert_ogg_to_mp3("voice.ogg", "voice.mp3")
     audio_path = "voice.mp3"
 
-    # Транскрипция (ваш голос)
+    # Транскрипция голоса
     prompt = transcribe_whisper_groq(audio_path)
     if not prompt:
         await update.message.reply_text("Не удалось распознать голосовое сообщение.")
