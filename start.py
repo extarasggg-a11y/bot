@@ -1,6 +1,11 @@
 import os
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup
+)
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -22,8 +27,6 @@ load_dotenv()
 groq_api_key = os.getenv("GROQ_API_KEY")
 telegram_token = os.getenv("TELEGRAM_TOKEN")
 groq_client = Groq(api_key=groq_api_key)
-
-# История чата: user_id -> list of dicts: {"origin": оригинал, "fixed": исправленный (или None), "answer": ответ}
 chat_history = {}
 
 def convert_ogg_to_mp3(in_file, out_file):
@@ -66,8 +69,12 @@ async def synthesize_voice(text, filename="voice.mp3", lang="ru-RU", voice="ru-R
     communicate = Communicate(text, voice=voice)
     await communicate.save(filename)
 
+def get_reply_keyboard():
+    keyboard = [["Меню"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
+    keyboard_inline = [
         [
             InlineKeyboardButton("▶️ Старт", callback_data="start"),
             InlineKeyboardButton("📝 Исправить", callback_data="fix_transcript"),
@@ -80,25 +87,34 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("❓ Помощь", callback_data="help"),
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup_inline = InlineKeyboardMarkup(keyboard_inline)
+    reply_markup_keyboard = get_reply_keyboard()
     text = (
         "👋 Добро пожаловать!\n\n"
-        "🎤 Присылайте голосовое — получите транскрипцию, ответ и озвучку.\n\n"
+        "🎤 Пришлите голосовое — бот покажет транскрипцию, ответит и озвучит его.\n"
         "Меню ниже ⬇️"
     )
-    await update.message.reply_text(text, reply_markup=reply_markup)
+    await update.message.reply_text(text, reply_markup=reply_markup_inline)
+    await update.message.reply_text(
+        "Для быстрого доступа всегда используйте кнопку «Меню» ⬇️ под строкой ввода.",
+        reply_markup=reply_markup_keyboard
+    )
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_handler(update, context)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    reply_markup_keyboard = get_reply_keyboard()
 
     if query.data == "start":
-        await query.message.reply_text("▶️ Готов к новым сообщениям! Просто пришлите голосовое 👇")
+        await query.message.reply_text("▶️ Готов к новым сообщениям! Просто пришлите голосовое 👇", reply_markup=reply_markup_keyboard)
     elif query.data == "history":
         history = chat_history.get(user_id, [])
         if not history:
-            await query.message.reply_text("🗂️ История пуста! Начните диалог — пришлите голос или текст.")
+            await query.message.reply_text("🗂️ История пуста! Начните диалог — пришлите голос или текст.", reply_markup=reply_markup_keyboard)
         else:
             blocks = []
             for h in history:
@@ -108,19 +124,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 part += f"\n🤖 Ответ: {h['answer']}"
                 blocks.append(part)
             text = "\n\n━━━━━━━━━━\n\n".join(blocks)
-            await query.message.reply_text(f"🗂️ Ваша история чата:\n\n{text}")
+            await query.message.reply_text(f"🗂️ Ваша история чата:\n\n{text}", reply_markup=reply_markup_keyboard)
     elif query.data == "fix_transcript":
         context.user_data["fix_mode"] = True
-        await query.message.reply_text("📝 Введите исправленный текст для транскрипции:")
+        await query.message.reply_text("📝 Введите исправленный текст для транскрипции:", reply_markup=reply_markup_keyboard)
     elif query.data == "voice_fixed":
         fixed = context.user_data.get("fixed_transcript")
         if not fixed:
-            await query.message.reply_text("❗ Нет исправленной транскрипции. Сначала введите её через кнопку '📝 Исправить'.")
+            await query.message.reply_text("❗ Нет исправленной транскрипции. Введите её через кнопку '📝 Исправить'.", reply_markup=reply_markup_keyboard)
         else:
             await synthesize_voice(fixed, filename="fixed.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
             with open("fixed.mp3", "rb") as f:
                 await query.message.reply_voice(voice=f)
-            await query.message.reply_text("🔊 Ваша исправленная транскрипция озвучена!")
+            await query.message.reply_text("🔊 Ваша исправленная транскрипция озвучена!", reply_markup=reply_markup_keyboard)
     elif query.data == "help":
         help_text = (
             "❓ Что умеет бот:\n"
@@ -130,7 +146,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Красивые иконки для вашего удобства\n\n"
             "Пришлите голосовое или текст — получите сразу полный ответ!"
         )
-        await query.message.reply_text(help_text)
+        await query.message.reply_text(help_text, reply_markup=reply_markup_keyboard)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -139,20 +155,19 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     convert_ogg_to_mp3("voice.ogg", "voice.mp3")
     audio_path = "voice.mp3"
 
-    # Транскрипция голосового
     prompt = transcribe_whisper_groq(audio_path)
     if not prompt or len(prompt) < 4:
         await update.message.reply_text(
-            "❗ Не удалось хорошо распознать ваш голос. Воспользуйтесь кнопкой '📝 Исправить', чтобы вручную ввести текст!"
+            "❗ Не удалось хорошо распознать ваш голос. Воспользуйтесь кнопкой '📝 Исправить', чтобы вручную ввести текст!",
+            reply_markup=get_reply_keyboard()
         )
         context.user_data["fix_mode"] = True
         return
 
-    await update.message.reply_text(f"🎤 Транскрипция:\n{prompt}")
+    await update.message.reply_text(f"🎤 Транскрипция:\n{prompt}", reply_markup=get_reply_keyboard())
     context.user_data["last_transcript"] = prompt
-    context.user_data["fixed_transcript"] = None  # новый голос — сбрасываем исправленное
+    context.user_data["fixed_transcript"] = None
 
-    # GPT — только русский, без спецформатирования
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[
@@ -164,7 +179,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     answer_text = response.choices[0].message.content
 
-    await update.message.reply_text(f"🤖 Ответ:\n{answer_text}")
+    await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
@@ -178,9 +193,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("fix_mode"):
         context.user_data["fixed_transcript"] = text
         context.user_data["fix_mode"] = False
-        await update.message.reply_text(f"✏️ Исправленная транскрипция сохранена: {text}")
+        await update.message.reply_text(f"✏️ Исправленная транскрипция сохранена: {text}", reply_markup=get_reply_keyboard())
 
-        # GPT — только русский, без спецформата; эмодзи по ситуации
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=[
@@ -191,7 +205,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_tokens=512
         )
         answer_text = response.choices[0].message.content
-        await update.message.reply_text(f"🤖 Ответ:\n{answer_text}")
+        await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
         await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
         with open("answer.mp3", "rb") as f:
             await update.message.reply_voice(voice=f)
@@ -203,7 +217,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         return
 
-    # Обычный текстовый запрос
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[
@@ -214,7 +227,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_tokens=512
     )
     answer_text = response.choices[0].message.content
-    await update.message.reply_text(f"🤖 Ответ:\n{answer_text}")
+    await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
@@ -224,7 +237,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(telegram_token).build()
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^Меню$"), menu_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^Меню$"), text_handler))
     app.run_polling()
