@@ -19,6 +19,7 @@ from groq import Groq
 import requests
 from edge_tts import Communicate
 import shutil
+import re
 
 if shutil.which("ffmpeg") is None:
     raise RuntimeError("ffmpeg не установлен! Проверьте Dockerfile или логи.")
@@ -65,8 +66,18 @@ def transcribe_whisper_groq(audio_path, fallback_models=None):
                 print(f"Groq Whisper {model} failed:", e)
     return ""
 
+def remove_emojis(text):
+    # Очистка текста от эмодзи перед озвучкой
+    emoji_pattern = re.compile("[\U00010000-\U0010ffff]", flags=re.UNICODE)
+    text = emoji_pattern.sub(r'', text)
+    # Удаляем спец значки (простые)
+    text = re.sub(r'[▶️📝🔊🗂️❓✏️🤖📦🎤💡⛑️👍]', '', text)
+    return text.strip()
+
 async def synthesize_voice(text, filename="voice.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural"):
-    communicate = Communicate(text, voice=voice)
+    # Перед озвучкой чистим от эмодзи
+    text_clean = remove_emojis(text)
+    communicate = Communicate(text_clean, voice=voice)
     await communicate.save(filename)
 
 def get_reply_keyboard():
@@ -124,7 +135,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 part += f"\n🤖 Ответ: {h['answer']}"
                 blocks.append(part)
             text = "\n\n━━━━━━━━━━\n\n".join(blocks)
-            await query.message.reply_text(f"🗂️ Ваша история чата:\n\n{text}", reply_markup=reply_markup_keyboard)
+            # Разбиваем длинную историю на части и отправляем последовательно
+            max_len = 4000
+            messages = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+            for msg in messages:
+                await query.message.reply_text(f"🗂️ Ваша история чата:\n\n{msg}", reply_markup=reply_markup_keyboard)
     elif query.data == "fix_transcript":
         context.user_data["fix_mode"] = True
         await query.message.reply_text("📝 Введите исправленный текст для транскрипции:", reply_markup=reply_markup_keyboard)
