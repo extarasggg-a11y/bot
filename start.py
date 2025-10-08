@@ -15,7 +15,6 @@ import requests
 from edge_tts import Communicate
 import shutil
 
-# Проверка наличия ffmpeg
 if shutil.which("ffmpeg") is None:
     raise RuntimeError("ffmpeg не установлен! Проверьте Dockerfile или логи.")
 
@@ -24,7 +23,7 @@ groq_api_key = os.getenv("GROQ_API_KEY")
 telegram_token = os.getenv("TELEGRAM_TOKEN")
 groq_client = Groq(api_key=groq_api_key)
 
-# Глобальная история чата (user_id -> list of (prompt, answer))
+# user_id -> list of dicts: {"origin": original, "fixed": fixed (или None), "answer": answer}
 chat_history = {}
 
 def convert_ogg_to_mp3(in_file, out_file):
@@ -54,7 +53,7 @@ def transcribe_whisper_groq(audio_path, fallback_models=["whisper-large-v3", "wh
                 print(f"Groq Whisper {model} failed:", e)
     return ""
 
-async def synthesize_voice(text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural"):
+async def synthesize_voice(text, filename="voice.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural"):
     communicate = Communicate(text, voice=voice)
     await communicate.save(filename)
 
@@ -75,8 +74,12 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
         "👋 *Добро пожаловать!*\n\n"
-        "Отправьте голосовое сообщение — бот сразу покажет транскрипцию, ответит текстом и голосом.\n\n"
-        "Выберите действие из меню:"
+        "Отправьте голосовое — бот покажет транскрипцию, ответит GPT и озвучит его.\n"
+        "Исправьте текст — кнопку «📝 Исправить транскрипцию».\n"
+        "Озвучьте исправленное — «🔊 Озвучить исправленное».\n"
+        "Посмотрите историю — «📜 История чата».\n"
+        "Для справки — «❓ Помощь».\n"
+        "Меню:"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -86,15 +89,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if query.data == "start":
-        await query.message.reply_text(
-            "▶️ Вы можете отправить новое голосовое сообщение!"
-        )
+        await query.message.reply_text("▶️ Пришлите новое голосовое сообщение!")
     elif query.data == "history":
         history = chat_history.get(user_id, [])
         if not history:
             await query.message.reply_text("📜 История пуста!")
         else:
-            text = "\n\n".join([f"👤 *Вы:* {h[0]}\n🤖 *Бот:* {h[1]}" for h in history])
+            blocks = []
+            for h in history:
+                part = (
+                    f"👤 *Транскрипция:* {h['origin']}"
+                )
+                if h.get("fixed"):
+                    part += f"\n✏️ *Исправлено:* {h['fixed']}"
+                part += f"\n🤖 *Ответ:* {h['answer']}"
+                blocks.append(part)
+            text = "\n\n".join(blocks)
             await query.message.reply_text(f"Ваша история чата:\n\n{text}", parse_mode="Markdown")
     elif query.data == "fix_transcript":
         context.user_data["fix_mode"] = True
@@ -102,49 +112,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "voice_fixed":
         fixed = context.user_data.get("fixed_transcript")
         if not fixed:
-            await query.message.reply_text("🔖 Нет исправленной транскрипции. Введите её через '📝 Исправить транскрипцию'.")
+            await query.message.reply_text("🔖 Нет исправленной транскрипции. Введите её через «📝 Исправить транскрипцию».")
         else:
             await synthesize_voice(fixed, filename="fixed.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
             with open("fixed.mp3", "rb") as f:
                 await query.message.reply_voice(voice=f)
-            await query.message.reply_text("🔊 Готово, исправленный текст озвучен!")
+            await query.message.reply_text("🔊 Озвучена ваша исправленная транскрипция!")
+
     elif query.data == "help":
         help_text = (
             "❓ *Что умеет бот:*\n\n"
-            "- Получать голосовое и выводить транскрипцию\n"
-            "- Отвечать GPT прямо в чате\n"
-            "- Озвучивать ответы и ваши исправленные транскрипции\n"
-            "- Показывать всю вашу историю общения\n"
-            "- Для исправления транскрипции воспользуйтесь соответствующей кнопкой!"
+            "- Показать транскрипцию голосовых\n"
+            "- Отвечать GPT в чат\n"
+            "- Озвучивать GPT-ответ, а также ваш исправленный текст\n"
+            "- Показывать всю историю диалога\n"
+            "- Исправлять текст транскрипции вручную\n\n"
+            "Меню доступно всегда через /start"
         )
         await query.message.reply_text(help_text, parse_mode="Markdown")
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "start":
-        await query.message.reply_text("Привет! Отправьте голосовое, чтобы получить транскрипцию и ответ.")
-    elif query.data == "history":
-        history = chat_history.get(user_id, [])
-        if not history:
-            await query.message.reply_text("История пуста!")
-        else:
-            text = "\n---\n".join([f"Вы: {h[0]}\nБот: {h[1]}" for h in history])
-            await query.message.reply_text(f"Ваша история чата:\n{text}")
-    elif query.data == "fix_transcript":
-        context.user_data["fix_mode"] = True
-        await query.message.reply_text("Введите исправленную транскрипцию текстом:")
-    elif query.data == "voice_fixed":
-        fixed = context.user_data.get("fixed_transcript")
-        if not fixed:
-            await query.message.reply_text("Нет исправленной транскрипции. Введите её через 'Исправить транскрипцию'.")
-        else:
-            await synthesize_voice(fixed, filename="fixed.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
-            with open("fixed.mp3", "rb") as f:
-                await query.message.reply_voice(voice=f)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -153,13 +138,17 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     convert_ogg_to_mp3("voice.ogg", "voice.mp3")
     audio_path = "voice.mp3"
 
+    # Транскрипция голосового
     prompt = transcribe_whisper_groq(audio_path)
     if not prompt:
         await update.message.reply_text("Не удалось распознать голосовое сообщение.")
         return
 
     await update.message.reply_text(f"Транскрипция:\n{prompt}")
+    context.user_data["last_transcript"] = prompt
+    context.user_data["fixed_transcript"] = None  # сбрасываем, если пришло новое голосовое
 
+    # GPT по исходной транскрипции (или исправленной, если была)
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
@@ -173,19 +162,37 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
 
-    chat_history.setdefault(user_id, []).append((prompt, answer_text))
-    context.user_data["last_transcript"] = prompt
+    # Записываем в историю
+    chat_history.setdefault(user_id, []).append({"origin": prompt, "fixed": None, "answer": answer_text})
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
+    # Если пользователь хочет исправить транскрипцию
     if context.user_data.get("fix_mode"):
         context.user_data["fixed_transcript"] = text
         context.user_data["fix_mode"] = False
-        await update.message.reply_text(f"Исправленная транскрипция сохранена: {text}")
+        await update.message.reply_text(f"✏️ Исправленная транскрипция сохранена: {text}")
+
+        # GPT-ответ по исправленной транскрипции + озвучка
+        response = groq_client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": text}],
+            temperature=0.12,
+            max_tokens=512
+        )
+        answer_text = response.choices[0].message.content
+        await update.message.reply_text(answer_text)
+        await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
+        with open("answer.mp3", "rb") as f:
+            await update.message.reply_voice(voice=f)
+
+        # Сохраняем в историю с пометкой исправленной версии
+        chat_history.setdefault(user_id, []).append({"origin": context.user_data.get("last_transcript", ""), "fixed": text, "answer": answer_text})
         return
 
+    # Обычный текстовый запрос
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": text}],
@@ -198,7 +205,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
 
-    chat_history.setdefault(user_id, []).append((text, answer_text))
+    chat_history.setdefault(user_id, []).append({"origin": text, "fixed": None, "answer": answer_text})
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(telegram_token).build()
