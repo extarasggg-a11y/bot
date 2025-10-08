@@ -4,3 +4,4 @@ groq
 dotenv
 pydub
 requests
+pyaudioop
