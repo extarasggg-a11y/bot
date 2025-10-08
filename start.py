@@ -6,6 +6,12 @@ import ffmpeg
 from groq import Groq
 import requests
 from edge_tts import Communicate
+import shutil
+
+# Проверка наличия ffmpeg
+ffmpeg_path = shutil.which("ffmpeg")
+if ffmpeg_path is None:
+    raise RuntimeError("ffmpeg не установлен! Проверьте Dockerfile или логи.")
 
 load_dotenv()
 groq_api_key = os.getenv("GROQ_API_KEY")
@@ -44,22 +50,18 @@ async def synthesize_voice(text, filename="answer.mp3", lang="ru-RU", voice="ru-
     await communicate.save(filename)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Скачиваем голосовое сообщение правильно (async)
     voice = await update.message.voice.get_file()
     await voice.download_to_drive("voice.ogg")
     convert_ogg_to_mp3("voice.ogg", "voice.mp3")
     audio_path = "voice.mp3"
 
-    # Транскрипция голоса
     prompt = transcribe_whisper_groq(audio_path)
     if not prompt:
         await update.message.reply_text("Не удалось распознать голосовое сообщение.")
         return
 
-    # Показываем транскрипцию
     await update.message.reply_text(f"Транскрипция вашего сообщения:\n{prompt}")
 
-    # GPT-ответ
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
@@ -68,9 +70,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     answer_text = response.choices[0].message.content
 
-    # Отправляем текстовый ответ
     await update.message.reply_text(answer_text)
-    # Озвучка и отправка голосом
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
