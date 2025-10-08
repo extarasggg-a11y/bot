@@ -34,7 +34,14 @@ def convert_ogg_to_mp3(in_file, out_file):
         .run(overwrite_output=True, quiet=True)
     )
 
-def transcribe_whisper_groq(audio_path, fallback_models=["whisper-large-v3", "whisper-large-v3-turbo"]):
+def transcribe_whisper_groq(audio_path, fallback_models=None):
+    if fallback_models is None:
+        fallback_models = [
+            "whisper-large-v3",
+            "whisper-large-v3-turbo",
+            "whisper-medium",
+            "whisper-medium-turbo",
+        ]
     for model in fallback_models:
         with open(audio_path, 'rb') as f:
             files = {'file': f}
@@ -47,8 +54,10 @@ def transcribe_whisper_groq(audio_path, fallback_models=["whisper-large-v3", "wh
             }
             try:
                 response = requests.post(url, files=files, headers=headers, data=data, timeout=60)
-                if response.status_code == 200 and response.text.strip():
-                    return response.text.strip()
+                text = response.text.strip()
+                text = text.replace('\n', ' ').replace('\r', '').replace('\t', ' ').strip()
+                if response.status_code == 200 and text and len(text) > 4:
+                    return text
             except Exception as e:
                 print(f"Groq Whisper {model} failed:", e)
     return ""
@@ -118,15 +127,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open("fixed.mp3", "rb") as f:
                 await query.message.reply_voice(voice=f)
             await query.message.reply_text("🔊 Озвучена ваша исправленная транскрипция!")
-
     elif query.data == "help":
         help_text = (
             "❓ *Что умеет бот:*\n\n"
-            "- Показать транскрипцию голосовых\n"
-            "- Отвечать GPT в чат\n"
-            "- Озвучивать GPT-ответ, а также ваш исправленный текст\n"
-            "- Показывать всю историю диалога\n"
-            "- Исправлять текст транскрипции вручную\n\n"
+            "- Получать голосовое, показывать транскрипцию (и исправлять вручную)\n"
+            "- Отвечать GPT на русском в чат\n"
+            "- Озвучивать ответы и ваши исправленные тексты\n"
+            "- Показывать историю сообщений и ответов\n\n"
             "Меню доступно всегда через /start"
         )
         await query.message.reply_text(help_text, parse_mode="Markdown")
@@ -140,18 +147,25 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Транскрипция голосового
     prompt = transcribe_whisper_groq(audio_path)
-    if not prompt:
-        await update.message.reply_text("Не удалось распознать голосовое сообщение.")
+    if not prompt or len(prompt) < 4:
+        await update.message.reply_text(
+            "Не удалось распознать голосовое сообщение.\n"
+            "Пожалуйста, попробуйте ещё раз или исправьте текст через '📝 Исправить транскрипцию'."
+        )
+        context.user_data["fix_mode"] = True
         return
 
     await update.message.reply_text(f"Транскрипция:\n{prompt}")
     context.user_data["last_transcript"] = prompt
-    context.user_data["fixed_transcript"] = None  # сбрасываем, если пришло новое голосовое
+    context.user_data["fixed_transcript"] = None  # новый голос — сбрасываем исправленное
 
-    # GPT по исходной транскрипции (или исправленной, если была)
+    # GPT всегда на русском
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "Вы — помощник, отвечайте только на русском языке. Не отвечайте на других языках."},
+            {"role": "user", "content": prompt}
+        ],
         temperature=0.12,
         max_tokens=512
     )
@@ -162,23 +176,25 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
 
-    # Записываем в историю
+    # История с учетом только оригинальной транскрипции
     chat_history.setdefault(user_id, []).append({"origin": prompt, "fixed": None, "answer": answer_text})
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
-    # Если пользователь хочет исправить транскрипцию
     if context.user_data.get("fix_mode"):
         context.user_data["fixed_transcript"] = text
         context.user_data["fix_mode"] = False
         await update.message.reply_text(f"✏️ Исправленная транскрипция сохранена: {text}")
 
-        # GPT-ответ по исправленной транскрипции + озвучка
+        # GPT-ответ по исправленной транскрипции — всегда русский
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-120b",
-            messages=[{"role": "user", "content": text}],
+            messages=[
+                {"role": "system", "content": "Вы — помощник, отвечайте только на русском языке. Не отвечайте на других языках."},
+                {"role": "user", "content": text}
+            ],
             temperature=0.12,
             max_tokens=512
         )
@@ -188,14 +204,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("answer.mp3", "rb") as f:
             await update.message.reply_voice(voice=f)
 
-        # Сохраняем в историю с пометкой исправленной версии
+        # История — видно, что это исправленная транскрипция
         chat_history.setdefault(user_id, []).append({"origin": context.user_data.get("last_transcript", ""), "fixed": text, "answer": answer_text})
         return
 
     # Обычный текстовый запрос
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
-        messages=[{"role": "user", "content": text}],
+        messages=[
+            {"role": "system", "content": "Вы — помощник, отвечайте только на русском языке. Не отвечайте на других языках."},
+            {"role": "user", "content": text}
+        ],
         temperature=0.12,
         max_tokens=512
     )
