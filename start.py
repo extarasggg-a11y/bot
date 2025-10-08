@@ -60,13 +60,65 @@ async def synthesize_voice(text, filename="answer.mp3", lang="ru-RU", voice="ru-
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Старт", callback_data="start")],
-        [InlineKeyboardButton("Исправить транскрипцию", callback_data="fix_transcript")],
-        [InlineKeyboardButton("Озвучить исправленную", callback_data="voice_fixed")],
-        [InlineKeyboardButton("Весь чат", callback_data="history")],
+        [
+            InlineKeyboardButton("▶️ Старт", callback_data="start"),
+            InlineKeyboardButton("📝 Исправить транскрипцию", callback_data="fix_transcript"),
+        ],
+        [
+            InlineKeyboardButton("🔊 Озвучить исправленное", callback_data="voice_fixed"),
+        ],
+        [
+            InlineKeyboardButton("📜 История чата", callback_data="history"),
+            InlineKeyboardButton("❓ Помощь", callback_data="help"),
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Меню действий:", reply_markup=reply_markup)
+    text = (
+        "👋 *Добро пожаловать!*\n\n"
+        "Отправьте голосовое сообщение — бот сразу покажет транскрипцию, ответит текстом и голосом.\n\n"
+        "Выберите действие из меню:"
+    )
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "start":
+        await query.message.reply_text(
+            "▶️ Вы можете отправить новое голосовое сообщение!"
+        )
+    elif query.data == "history":
+        history = chat_history.get(user_id, [])
+        if not history:
+            await query.message.reply_text("📜 История пуста!")
+        else:
+            text = "\n\n".join([f"👤 *Вы:* {h[0]}\n🤖 *Бот:* {h[1]}" for h in history])
+            await query.message.reply_text(f"Ваша история чата:\n\n{text}", parse_mode="Markdown")
+    elif query.data == "fix_transcript":
+        context.user_data["fix_mode"] = True
+        await query.message.reply_text("📝 Введите исправленный текст транскрипции:")
+    elif query.data == "voice_fixed":
+        fixed = context.user_data.get("fixed_transcript")
+        if not fixed:
+            await query.message.reply_text("🔖 Нет исправленной транскрипции. Введите её через '📝 Исправить транскрипцию'.")
+        else:
+            await synthesize_voice(fixed, filename="fixed.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
+            with open("fixed.mp3", "rb") as f:
+                await query.message.reply_voice(voice=f)
+            await query.message.reply_text("🔊 Готово, исправленный текст озвучен!")
+    elif query.data == "help":
+        help_text = (
+            "❓ *Что умеет бот:*\n\n"
+            "- Получать голосовое и выводить транскрипцию\n"
+            "- Отвечать GPT прямо в чате\n"
+            "- Озвучивать ответы и ваши исправленные транскрипции\n"
+            "- Показывать всю вашу историю общения\n"
+            "- Для исправления транскрипции воспользуйтесь соответствующей кнопкой!"
+        )
+        await query.message.reply_text(help_text, parse_mode="Markdown")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
