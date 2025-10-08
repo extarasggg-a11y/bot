@@ -57,14 +57,14 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось распознать голосовое сообщение.")
         return
 
-    # Запрос к GPT через Groq
+    # Запрос к GPT через Groq (ИСПРАВЛЕНО)
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.12,
         max_tokens=512
     )
-    answer_text = response['choices'][0]['message']['content']
+    answer_text = response.choices[0].message.content
 
     # Озвучка ответа
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
@@ -74,13 +74,16 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
+    
+    # Запрос к GPT через Groq (ИСПРАВЛЕНО)
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": user_text}],
         temperature=0.12,
         max_tokens=512
     )
-    answer_text = response['choices'][0]['message']['content']
+    answer_text = response.choices[0].message.content
+    
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     await update.message.reply_text(answer_text)
     with open("answer.mp3", "rb") as f:
