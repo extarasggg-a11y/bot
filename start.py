@@ -5,7 +5,6 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 import ffmpeg
 from groq import Groq
 import requests
-import asyncio
 from edge_tts import Communicate
 
 load_dotenv()
@@ -45,19 +44,22 @@ async def synthesize_voice(text, filename="answer.mp3", lang="ru-RU", voice="ru-
     await communicate.save(filename)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Скачиваем и конвертируем голосовое сообщение
+    # Скачиваем и конвертируем голосовое
     voice = await update.message.voice.get_file()
     voice.download("voice.ogg")
     convert_ogg_to_mp3("voice.ogg", "voice.mp3")
     audio_path = "voice.mp3"
 
-    # Транскрипция через Groq Whisper
+    # Транскрипция (ваш голос)
     prompt = transcribe_whisper_groq(audio_path)
     if not prompt:
         await update.message.reply_text("Не удалось распознать голосовое сообщение.")
         return
 
-    # Запрос к GPT через Groq (ИСПРАВЛЕНО)
+    # Показываем транскрипцию
+    await update.message.reply_text(f"Транскрипция вашего сообщения:\n{prompt}")
+
+    # GPT-ответ
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
@@ -66,16 +68,15 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     answer_text = response.choices[0].message.content
 
-    # Озвучка ответа
-    await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
+    # Отправляем текстовый ответ
     await update.message.reply_text(answer_text)
+    # Озвучка и отправка голосом
+    await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    
-    # Запрос к GPT через Groq (ИСПРАВЛЕНО)
     response = groq_client.chat.completions.create(
         model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": user_text}],
@@ -83,9 +84,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_tokens=512
     )
     answer_text = response.choices[0].message.content
-    
-    await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     await update.message.reply_text(answer_text)
+    await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
         await update.message.reply_voice(voice=f)
 
