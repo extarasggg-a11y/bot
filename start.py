@@ -20,6 +20,7 @@ import requests
 from edge_tts import Communicate
 import shutil
 import re
+import time
 
 if shutil.which("ffmpeg") is None:
     raise RuntimeError("ffmpeg не установлен! Проверьте Dockerfile или логи.")
@@ -29,6 +30,14 @@ groq_api_key = os.getenv("GROQ_API_KEY")
 telegram_token = os.getenv("TELEGRAM_TOKEN")
 groq_client = Groq(api_key=groq_api_key)
 chat_history = {}
+
+# Model fallback hierarchy
+FALLBACK_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant"
+]
 
 def convert_ogg_to_mp3(in_file, out_file):
     (
@@ -65,6 +74,65 @@ def transcribe_whisper_groq(audio_path, fallback_models=None):
             except Exception as e:
                 print(f"Groq Whisper {model} failed:", e)
     return ""
+
+def chat_with_fallback(messages, temperature=0.12, max_tokens=512, models=None):
+    """
+    Вызов Groq Chat API с автоматическим переключением на резервные модели при ошибке 429.
+    
+    Args:
+        messages: Список сообщений для чата
+        temperature: Температура генерации
+        max_tokens: Максимум токенов в ответе
+        models: Список моделей для перебора (по умолчанию FALLBACK_MODELS)
+    
+    Returns:
+        Объект response от Groq API
+    
+    Raises:
+        Exception: Если все модели вернули ошибку
+    """
+    if models is None:
+        models = FALLBACK_MODELS
+    
+    last_error = None
+    
+    for model in models:
+        try:
+            print(f"🔄 Попытка использовать модель: {model}")
+            response = groq_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            print(f"✅ Успешный ответ от модели: {model}")
+            return response
+            
+        except Exception as e:
+            error_str = str(e)
+            print(f"⚠️ Ошибка для модели {model}: {error_str}")
+            
+            # Проверяем код ошибки 429 (Rate Limit)
+            if "429" in error_str or "rate_limit" in error_str.lower():
+                print(f"⏳ Rate limit достигнут для {model}, переключаюсь на следующую модель...")
+                last_error = e
+                time.sleep(1)  # Короткая пауза перед переключением
+                continue
+            
+            # Другие ошибки также пробуем обработать с фолбэком
+            elif "503" in error_str or "502" in error_str or "500" in error_str:
+                print(f"🔧 Серверная ошибка для {model}, переключаюсь...")
+                last_error = e
+                time.sleep(2)
+                continue
+            
+            # Если ошибка не связана с перегрузкой, пробрасываем её
+            else:
+                last_error = e
+                continue
+    
+    # Если все модели не сработали
+    raise Exception(f"❌ Все модели недоступны. Последняя ошибка: {last_error}")
 
 def remove_emojis(text):
     # Очистка текста от эмодзи перед озвучкой
@@ -183,16 +251,19 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["last_transcript"] = prompt
     context.user_data["fixed_transcript"] = None
 
-    response = groq_client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.12,
-        max_tokens=512
-    )
-    answer_text = response.choices[0].message.content
+    try:
+        response = chat_with_fallback(
+            messages=[
+                {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.12,
+            max_tokens=512
+        )
+        answer_text = response.choices[0].message.content
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при генерации ответа: {e}", reply_markup=get_reply_keyboard())
+        return
 
     await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
@@ -210,16 +281,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["fix_mode"] = False
         await update.message.reply_text(f"✏️ Исправленная транскрипция сохранена: {text}", reply_markup=get_reply_keyboard())
 
-        response = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.12,
-            max_tokens=512
-        )
-        answer_text = response.choices[0].message.content
+        try:
+            response = chat_with_fallback(
+                messages=[
+                    {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0.12,
+                max_tokens=512
+            )
+            answer_text = response.choices[0].message.content
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка при генерации ответа: {e}", reply_markup=get_reply_keyboard())
+            return
+
         await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
         await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
         with open("answer.mp3", "rb") as f:
@@ -232,16 +307,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         return
 
-    response = groq_client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.12,
-        max_tokens=512
-    )
-    answer_text = response.choices[0].message.content
+    try:
+        response = chat_with_fallback(
+            messages=[
+                {"role": "system", "content": "Ты дружелюбный помощник, всегда отвечай обычным русским текстом, без Markdown, без ##, без **. Добавляй уместные эмодзи для красоты и структуры (например: 🤖, ✏️, 📦, 📝, 🎤, 🔊, 💡, ⛑️, 🗂️, 👍)"},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.12,
+            max_tokens=512
+        )
+        answer_text = response.choices[0].message.content
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при генерации ответа: {e}", reply_markup=get_reply_keyboard())
+        return
+
     await update.message.reply_text(f"🤖 Ответ:\n{answer_text}", reply_markup=get_reply_keyboard())
     await synthesize_voice(answer_text, filename="answer.mp3", lang="ru-RU", voice="ru-RU-DmitryNeural")
     with open("answer.mp3", "rb") as f:
